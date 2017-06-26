@@ -487,15 +487,32 @@ static int davinci_mcasp_set_dai_fmt(struct snd_soc_dai *cpu_dai,
 		break;
 	case SND_SOC_DAIFMT_CBM_CFM:
 		/* codec is clock and frame master */
-		mcasp_clr_bits(mcasp, DAVINCI_MCASP_ACLKXCTL_REG, ACLKXE);
-		mcasp_clr_bits(mcasp, DAVINCI_MCASP_TXFMCTL_REG, AFSXE);
+
+		/*
+		 * Section hacked to make the controller receive the master clock on AHCLKR and AHCLKX, receive
+		 * section all slave, transmit section internally generated, making it master, except for the master clock.
+		 */
+
+		//mcasp_clr_bits(mcasp, DAVINCI_MCASP_ACLKXCTL_REG, ACLKXE);
+		//mcasp_clr_bits(mcasp, DAVINCI_MCASP_TXFMCTL_REG, AFSXE);
 
 		mcasp_clr_bits(mcasp, DAVINCI_MCASP_ACLKRCTL_REG, ACLKRE);
 		mcasp_clr_bits(mcasp, DAVINCI_MCASP_RXFMCTL_REG, AFSRE);
 
 		mcasp_clr_bits(mcasp, DAVINCI_MCASP_PDIR_REG,
-			       ACLKX | AHCLKX | AFSX | ACLKR | AHCLKR | AFSR);
-		mcasp->bclk_master = 0;
+		           AHCLKX | ACLKR | AHCLKR | AFSR);
+
+		// tx bitclock and frame clock are output
+		mcasp_set_bits(mcasp, DAVINCI_MCASP_PDIR_REG, AFSX);
+		mcasp_set_bits(mcasp, DAVINCI_MCASP_PDIR_REG, ACLKX);
+
+		mcasp_set_bits(mcasp, DAVINCI_MCASP_ACLKXCTL_REG, ACLKXE); // tx bitclock from divider
+		mcasp_set_bits(mcasp, DAVINCI_MCASP_TXFMCTL_REG, AFSXE); // internally generated tx frame sync
+
+		mcasp_clr_bits(mcasp, DAVINCI_MCASP_AHCLKXCTL_REG, AHCLKXE); // transmit master clock externally clocked
+		mcasp_clr_bits(mcasp, DAVINCI_MCASP_AHCLKRCTL_REG, AHCLKRE); // receive master clock externally clocked
+
+		mcasp->bclk_master = 1;
 		break;
 	default:
 		ret = -EINVAL;
@@ -533,7 +550,7 @@ static int davinci_mcasp_set_dai_fmt(struct snd_soc_dai *cpu_dai,
 
 	if (fs_pol_rising) {
 		mcasp_clr_bits(mcasp, DAVINCI_MCASP_TXFMCTL_REG, FSXPOL);
-		mcasp_clr_bits(mcasp, DAVINCI_MCASP_RXFMCTL_REG, FSRPOL);
+		mcasp_set_bits(mcasp, DAVINCI_MCASP_RXFMCTL_REG, FSRPOL); // Hacked: this seems neccessary in TDM output mode, otherwise the first channel is the last one.
 	} else {
 		mcasp_set_bits(mcasp, DAVINCI_MCASP_TXFMCTL_REG, FSXPOL);
 		mcasp_set_bits(mcasp, DAVINCI_MCASP_RXFMCTL_REG, FSRPOL);
@@ -548,6 +565,10 @@ out:
 static int __davinci_mcasp_set_clkdiv(struct davinci_mcasp *mcasp, int div_id,
 				      int div, bool explicit)
 {
+
+	mcasp_mod_bits(mcasp, DAVINCI_MCASP_ACLKXCTL_REG, ACLKXDIV(2 - 1), ACLKXDIV_MASK); // Hardwired on DIR9001 pins, currently 2.
+	return 0;
+
 	pm_runtime_get_sync(mcasp->dev);
 	switch (div_id) {
 	case MCASP_CLKDIV_AUXCLK:			/* MCLK divider */
@@ -604,6 +625,10 @@ static int davinci_mcasp_set_sysclk(struct snd_soc_dai *dai, int clk_id,
 				    unsigned int freq, int dir)
 {
 	struct davinci_mcasp *mcasp = snd_soc_dai_get_drvdata(dai);
+
+	// Because our clock generator always generates the correct clock, we don't have to do anything here.
+	mcasp->sysclk_freq = freq;
+	return 0;
 
 	pm_runtime_get_sync(mcasp->dev);
 
@@ -939,7 +964,7 @@ static int mcasp_i2s_hw_param(struct davinci_mcasp *mcasp, int stream,
 		mcasp_set_reg(mcasp, DAVINCI_MCASP_RXTDM_REG, mask);
 		mcasp_set_bits(mcasp, DAVINCI_MCASP_RXFMT_REG, busel | RXORD);
 		mcasp_mod_bits(mcasp, DAVINCI_MCASP_RXFMCTL_REG,
-			       FSRMOD(total_slots), FSRMOD(0x1FF));
+		           FSRMOD(2), FSRMOD(0x1FF));
 		/*
 		 * If McASP is set to be TX/RX synchronous and the playback is
 		 * not running already we need to configure the TX slots in
@@ -1337,7 +1362,7 @@ static int davinci_mcasp_startup(struct snd_pcm_substream *substream,
 	 * If we rely on implicit BCLK divider setting we should
 	 * set constraints based on what we can provide.
 	 */
-	if (mcasp->bclk_master && mcasp->bclk_div == 0 && mcasp->sysclk_freq) {
+	if (mcasp->bclk_master && mcasp->bclk_div == 0 && mcasp->sysclk_freq && false) {
 		int ret;
 
 		ruledata->mcasp = mcasp;
@@ -1498,7 +1523,7 @@ static struct snd_soc_dai_driver davinci_mcasp_dai[] = {
 		.ops 		= &davinci_mcasp_dai_ops,
 
 		.symmetric_samplebits	= 1,
-		.symmetric_rates	= 1,
+	    .symmetric_rates	= 0,
 	},
 	{
 		.name		= "davinci-mcasp.1",
